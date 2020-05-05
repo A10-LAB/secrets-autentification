@@ -7,6 +7,8 @@ const mongoose = require("mongoose");
 const session = require("express-session");
 const passport = require("passport");
 const passportLocalMongoose = require('passport-local-mongoose');
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
+var findOrCreate = require('mongoose-findorcreate');
 
 // const bcrypt = require("bcrypt");
 // const saltRounds = 10;
@@ -47,18 +49,50 @@ mongoose.set("useCreateIndex", true);
 const userSchema = new mongoose.Schema
 ({
     email: String,
-    password: String
+    password: String,
+    googleID: String,
+    secret: String
 });
 
 // Новая схема для пакета passportLocalMongoose и минифицированный код
 userSchema.plugin(passportLocalMongoose);
+userSchema.plugin(findOrCreate);
 
 const User = new mongoose.model("User", userSchema);
 
 passport.use(User.createStrategy());
 
-passport.serializeUser(User.serializeUser());
-passport.deserializeUser(User.deserializeUser());
+// Код без авторизации через гугл и passport
+// passport.serializeUser(User.serializeUser());
+// passport.deserializeUser(User.deserializeUser());
+
+// Код для авторизации через гугл и passport
+passport.serializeUser(function(user, done) {
+    done(null, user.id); 
+});
+
+passport.deserializeUser(function(id, done) {
+    User.findById(id, function(err, user) {
+    done(err, user);
+    });
+});
+
+// Код для passport GoogleStrategy
+passport.use(new GoogleStrategy({
+    clientID: process.env.CLIENT_ID,
+    clientSecret:process.env.CLIENT_SECRET,
+    callbackURL: "http://localhost:3000/secrets",
+    // Код из баг фикса на гитхабе о неработающем гугл+
+    userProfileURL: "https://www.google.com/outh2/v3/userinfo"
+  },
+// Чтобы код работал нужен или более развернутый вариант (см. stack overflaw) или 
+// npm пакет npm install mongoose-findorcreate
+  function(accessToken, refreshToken, profile, cb) {
+    User.findOrCreate({ googleId: profile.id }, function (err, user) {
+      return cb(err, user);
+    });
+  }
+));
 
 // Crypto code. Use docs mongoose-encrypt
 // Используется в app.js до 2 уровня 
@@ -74,6 +108,17 @@ app.get("/", function(req, res)
     res.render("home");
 });
 
+// Аутентификация через гугл
+app.get("/auth/google",
+passport.authenticate("google", { scope: ["profile"] }));
+
+app.get("/auth/google/secrets", 
+  passport.authenticate("google", { failureRedirect: "/login" }),
+  function(req, res) {
+    // Successful authentication, redirect secrest.
+    res.redirect("/secrests");
+  });
+
 app.get("/login", function(req, res)
 {
     res.render("login");
@@ -87,14 +132,69 @@ app.get("/register", function(req, res)
 // Создание secret путь для того, чтобы он был доступен только во время авторизированной сессии
 app.get("/secrets", function(req, res)
 {
+    // При наличии кода на проверку того, что юзер залогинился - проверка не нужна
+    // if(req.isAuthenticated())
+    // {
+    //     res.render("secrets");
+    // }
+    // else
+    // {
+    //     res.redirect("/login")
+    // }
+    User.find({"secret": {$ne: null}}, function(err, foundUsers)
+    {
+        if(err)
+        {
+            console.log(err);
+        }
+        else{
+            if(foundUsers)
+            {
+                res.render("secrets", {usersWithSecrets: foundUsers});
+            }
+        }
+    });
+});
+
+app.get("/submit", function(req, res)
+{
     if(req.isAuthenticated())
     {
-        res.render("secrets");
+        res.render("submit");
     }
     else
     {
         res.redirect("/login")
     }
+});
+
+// Код для сохранения сообщения в базе для конкретного юзера
+app.post("/submit", function(req, res)
+{   
+    const submittedSecret = req.body.secret;
+    // passport сохраняет данные о сессии в req.user
+    User.findById(req.user.id, function(err, foundUser)
+    {
+        if(err)
+        {
+            console.log(err);
+        }
+        else
+        {
+            if (foundUser)
+            {
+                foundUser.secret = submittedSecret;
+                foundUser.save(function(){res.redirect("/secrets");});
+            }
+        }
+    });
+});
+
+// ******* Код редиректа для кнопки logout
+app.get("logout", function(req, res)
+{
+    req.logout();
+    res.redirect("/");
 });
 
 // ******* POST
@@ -133,6 +233,25 @@ app.post("/register", function(req, res)
 
 app.post("/login", function(req, res)
 {
+    const user = new User({
+        username: req.body.username,
+        password: req.bosy.password
+    });
+
+    req.login(user, function(err)
+    {
+        if(err)
+        {
+            console.log(err);
+        }
+        else
+        {
+            passport.authenticate("local")(req, res, function()
+            {
+                res.redirect("/secrets");
+            });
+        }
+    });
     // const username = req.body.username;
     // const password = req.body.password;
 
@@ -152,7 +271,6 @@ app.post("/login", function(req, res)
     //         }
     //     } 
     // });
-
 });
 
 // Listen ports
